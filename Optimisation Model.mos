@@ -1,0 +1,630 @@
+model "Allocating MSc Project to Students"
+  uses "mmxprs"
+  uses "mmsystem"
+  uses "mmetc"
+
+! ====== READ ME ====== !
+
+! If your datafile takes 'Path A' or 'Path B', you will be informed of this in the console
+
+! We now give an outline of what each parameter represents, and how to navigate this program
+
+! These values must be changed in 'parameters':
+! -> Set 'DATAFILE' equal to the directory of your .xlsx file
+! -> Set 'breadth' to the value that you wish. 2*'breadth'+1, will represent how many optimisations will be executed on 'Path A'
+
+! These values are optional, but only should be used if the datafile is deemed suitable - i.e. it has previously taken 'Path A'
+! -> 'customAlphas' should be set to 'true' if you wish to search for solutions at finer margins of alpha
+! -> 'customDepth' will represent the number of equally spaced values of alpha will be executed within the optimisation
+! -> 'maxExponent' represents the maximum exponent of n that alpha will be set equal to
+! -> 'minExponent' represents the minimum exponent of n that alpha will be set equal to
+!           e.g. with 'customDepth' = 5, 'maxExponent' = 2/5, 'minExponent' = -2/5, then the program will iterate through ...
+!                 ... {n^(2/5), n^(1/5), 1, n^(-1/5), n^(-2/5)}
+
+! Once a type of objective function has been decided upon ...
+! -> 'standaloneOBJ' should be set to 'true'
+! -> 'OBJtype' should be set to one of the following, that corresponds to your choice ...
+!       1 - Custom Alpha
+!       2 - Sequential Maximisation
+!       3 - Middle-Ground Approach
+!       4 - Sequential Minimisation
+! -> If choosing 'OBJtype' = 1, then 'customAlphaExponent' should be set to the desired value (i.e. if you want alpha = n^(1/5), set 'customAlphaExponent' = 1/5)
+!       ... Running the program will now output the full allocation to a csv formatted file. You will be informed of this in the console.
+
+parameters
+  DATAFILE = 'data/DataSet2.xlsx' ! Ensure that you use the suffix '.xlsx'
+
+  breadth = 5
+
+  customAlphas = false
+  customDepth = 7
+  maxExponent = 1
+  minExponent = -1
+
+  standaloneOBJ = false
+  OBJtype = 1
+  customAlphaExponent = 1/5
+end-parameters
+
+if standaloneOBJ and OBJtype not in {1,2,3,4} then
+  writeln('Error: Parameter "OBJtype" is not valid. Please choose from 1, 2, 3 or 4. A description of their functions can be found in README.txt')
+  exit(1)
+end-if
+
+! Save start time
+start_time := gettime
+
+writeln ; write('Initialising Constants and Variables...')
+
+declarations
+  ! Maximum number of preferences a student is allowed to make
+  maxPref: integer
+  ! Set of all degree programmes
+  setDegrees: set of string
+  ! Set of all students (order is retained from Excel file)
+  students: set of string
+  ! Set of all projects (order is retained from Excel file)
+  projects: set of string
+end-declarations
+! Initialisations from Excel file
+initialisations from "mmsheet.xlsx:" + DATAFILE
+  maxPref as 'skiph;[Other$A:A]'
+  setDegrees as 'skiph;[Students$B:B]'
+  students as 'skiph;[Students$A:A]'
+  projects as 'skiph;[Projects$A:A]'
+end-initialisations
+totalDegrees := getsize(setDegrees)
+totalStudents := getsize(students)
+totalProjects := getsize(projects)
+alphabet := ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z']
+if(maxPref+2 > 26) then
+  forall(i in 1..maxPref+24) do
+    factor := floor(i/26)
+    alphabet += [alphabet(factor+1)+alphabet(i-(26*factor))]
+  end-do
+end-if
+
+
+! ===== COMPUTE READ-IN CODE FOR THE UNIQUE EXCEL SHEET GIVEN ===== !
+student_init := 'partndx;[Students$A2:'
+student_init += alphabet(maxPref+2) + string(totalStudents+1) + '](1'
+forall(p in 1..maxPref) do
+  student_init += ',' + string(p+2)
+end-do
+student_init += ')'
+
+degree_init := 'partndx;[Projects$A2:'
+degree_init += alphabet(totalDegrees+3) + string(totalProjects+1) + '](1'
+forall(d in 1..totalDegrees) do
+  degree_init += ',' + string(d+3)
+end-do
+degree_init += ')'
+! ===== ===== !
+
+declarations
+  preferences = 1..maxPref
+  ! Each students' degree programme
+  studentProgramme: array(students) of string
+  ! Each students' preferences in ascending order
+  !   *** The '_pre' suffixed variable will initially store the read in data from the .xlsx file. The variable with no suffix will then
+  !   'compact' the '_pre' variable to remove empty strings that may be read in as a by-product of not every student having
+  !   the same number of preferences.
+  studentPref_pre: array(students, preferences) of string
+  studentPref: array(students) of list of string
+  ! Each projects' supervisor
+  projectSupervisor: array(projects) of string
+  ! Each projects' maximum capacity of students
+  maxStudents: array(projects) of integer
+  ! Each projects' degree compatibility
+  !   *** The '_pre' suffixed variable will initially store the read in data from the .xlsx file. The variable with no suffix will then
+  !   'compact' the '_pre' variable to remove empty strings that may be read in as a by-product of not every project having
+  !   the same number of compatible degree programmes. Storing as set also makes it easier to check for existence of elements.
+  degreeCompatibility_pre: array(projects, 1..totalDegrees) of string
+  degreeCompatibility: array(projects) of set of string
+  ! Set of all supervisors
+  supervisors: set of string
+  ! Minimum and Maximum load for supervisors
+  minLoad: array(supervisors) of integer
+  maxLoad: array(supervisors) of integer
+end-declarations
+
+! Initialisations from Excel file
+initialisations from "mmsheet.xlsx:" + DATAFILE
+  studentPref_pre as student_init
+  degreeCompatibility_pre as degree_init
+  studentProgramme as 'skiph;[Students$A:B]'
+  [projectSupervisor,
+  maxStudents] as 'skiph;[Projects$A:C]'
+  supervisors as 'skiph;[Supervisors$A:A]'
+  [minLoad,
+  maxLoad] as 'skiph;[Supervisors$A:C]'
+end-initialisations
+
+declarations
+! Binary variable representing if a student is assigned to a project
+  x: array(students, projects) of mpvar
+  A: array(1..maxPref+1) of linctr
+  F: array(1..maxPref+1) of linctr
+  OBJ: linctr
+  temporarySet: set of string
+  weights: list of real
+  maxProjectsPerSupervisor: mpvar
+  minProjectsPerSupervisor: mpvar
+  tempPref: array(students) of list of string
+  tempPrefx: array(students) of set of string
+  expandLoad: array(supervisors) of mpvar
+  reduceLoad: array(supervisors) of mpvar
+  expandCapacity: array(projects) of mpvar
+  preAllocatedStudents: set of string
+end-declarations
+
+! Convert 2-dimensional array of students' preferences ==> into an array of lists (essentially removing unnecessary empty strings)
+forall(s in students, i in 1..maxPref | studentPref_pre(s,i) in projects) do
+  studentPref(s) += [studentPref_pre(s,i)]
+end-do
+
+! Convert 2-dimensional array of each projects' degree compatibility ==> into an array of sets (again removing empty strings inherited from xslx file)
+forall(p in projects, i in 1..getsize(setDegrees) | degreeCompatibility_pre(p,i) in setDegrees) do
+  degreeCompatibility(p) += {degreeCompatibility_pre(p,i)}
+end-do
+
+! Enforce that all students are compatible with the dummy project
+degreeCompatibility('Dummy') := setDegrees
+! Set upper limit for dummy project allocations to the total number of students
+maxStudents('Dummy') := getsize(students)
+maxLoad('Dummy') := getsize(students)
+
+writeln('...Done')
+
+! ================== USEFUL CHECKS ================== !
+
+! Check for Pre-Allocated Students
+write('Checking for Pre-Allocated Students...')
+
+preAllocated := false
+forall(s in students) do
+  if getsize(studentPref(s)) = 1 then
+    x(s,studentPref(s,1)) = 1
+    preAllocatedStudents += {s}
+    preAllocated := true
+  end-if
+end-do
+
+if preAllocated then
+  writeln; writeln('There are ',getsize(preAllocatedStudents),' pre-allocated student(s) to projects. These students will not be considered as part of the optimisation,
+neither will they contribute to the resulting F-Vector(s) and A-Vector(s). Their allocation, however, will still be recorded in the standalone output file.')
+else
+  writeln('...None Found')
+end-if
+
+! Repeated Student Preferences CHeck (leads to misleading results)
+stop := false
+forall(s in students - preAllocatedStudents) do
+  temporarySet := {}
+  forall(p in studentPref(s)) do
+    if p not in temporarySet then
+      temporarySet += {p}
+    else writeln('Error: Student ',s,' has been submitted with repeated preferences. Resolve this issue before continuing.')
+      stop := true
+    end-if
+  end-do
+end-do
+if stop then
+  exit(3)
+end-if
+
+! Primary Consistency Check - all of the choices of at least one student do not align with their programme (no compatibility)
+write('Primary Feasibility Check...')
+infeasible := false ; infeasibleStudents := 0
+forall(s in students - preAllocatedStudents) do
+  studentInfeasible := true
+  forall(p in studentPref(s)) do
+    if(studentProgramme(s) in degreeCompatibility(p)) then
+      studentInfeasible := false
+      break
+    end-if
+  end-do
+  if studentInfeasible then
+    if not infeasible then
+      writeln
+    end-if
+    writeln('Student ',s,' has made no feasible choices.')
+    infeasible := true
+    infeasibleStudents += 1
+  end-if
+end-do
+if infeasible then
+  writeln('...Infeasible!')
+else writeln('...OK!')
+end-if
+
+! ================== MODEL ================== !
+
+write('Enforcing Model Constraints...')
+
+! Enforce Integer Variable for expanding/reducing load constraints on supervisors (with maximum expansion bounds)
+forall (s in supervisors) do
+  expandLoad(s) is_integer ; reduceLoad(s) is_integer
+  0 <= expandLoad(s) ; expandLoad(s) <= 5
+  0 <= reduceLoad(s) ; reduceLoad(s) <= 5
+end-do
+! Enforce Integer Variable for expanding capacity on projects (with maximum expansion bound)
+forall(p in projects) do
+  expandCapacity(p) is_integer
+  0 <= expandCapacity(p) ; expandCapacity(p) <= 200
+end-do
+! For initial model, enforce that no bounds are changed
+expandLoadConstraint := sum(s in supervisors) expandLoad(s) = 0
+reduceLoadConstraint := sum(s in supervisors) reduceLoad(s) = 0
+expandCapacityConstraint := sum(p in projects) expandCapacity(p) = 0
+
+! Enforce Binary Variable
+forall(s in students, p in studentPref(s)) do
+  x(s,p) is_binary
+end-do
+
+! Each student is assigned one project
+forall(s in students) do
+  sum(p in projects) x(s,p) = 1
+end-do
+! Each student is assigned only a project they have given a preference for and for which they are compatible (allows for dummy project)
+forall(s in students - preAllocatedStudents) do
+  sum(p in studentPref(s) + ['Dummy'] | studentProgramme(s) in degreeCompatibility(p)) x(s,p) = 1
+end-do
+! Each paper isn't assigned more than its maximum capacity
+forall(p in projects) do
+  sum(s in students) x(s,p) <= maxStudents(p) + expandCapacity(p)
+end-do
+! Each faculty member is assigned a number of projects within their personal boundaries (**)
+forall(f in supervisors) do
+  sum(s in students, p in projects | projectSupervisor(p) = f) x(s,p) <= maxLoad(f) + expandLoad(f)
+  sum(s in students, p in projects | projectSupervisor(p) = f) x(s,p) >= minLoad(f) - reduceLoad(f)
+end-do
+
+
+! How many students are assigned a dummy project
+dummyStudents := sum(s in students) x(s,'Dummy')
+
+! Results Vectors
+F(1) := sum(s in students | getsize(studentPref(s)) >= 1, p in projects | p = studentPref(s,1)) x(s,p) - getsize(preAllocatedStudents)
+forall(i in 2..maxPref) do
+  F(i) := sum(s in students | getsize(studentPref(s)) >= i, p in projects | p = studentPref(s,i)) x(s,p)
+end-do
+F(maxPref+1) := dummyStudents
+
+A(1) := sum(i in 1..maxPref+1) F(i)
+forall(i in 2..maxPref+1) do
+  A(i) := A(i-1) - F(maxPref+3-i)
+end-do
+
+writeln('...Done')
+
+! ===== SECONDARY CONSISTENCY CHECK (WITH SUGGESTIONS) ===== !
+
+write('Secondary Feasibility Check...')
+
+! If no feasible solution exists where the number of students given a dummy project is less than or equal to the number of infeasible students,
+! then allow for changes in supervisor loads/project capacities. Print to screen suggestions that will minimise the total number
+! of changes to the data before obtaining a feasible solution.
+
+! Enforce no other students are given a dummy project except infeasible students, then run the optimisation with no objective function
+noDummiesConstraint := dummyStudents <= infeasibleStudents
+minimise(0)
+
+! If the problem is infeasible ... compute and print suggestions ... then exit model.
+if getprobstat = XPRS_INF then
+
+! ------------- INFEASIBLE ------------- !
+  writeln ; writeln('...Infeasible!
+In order to achieve a feasible solution, changes must be made to the data.
+Below are some suggestions that minimise the total changes to the data before achieving a feasible dataset.')
+  F(maxPref+1) = 0
+  ! << Allow only for changes in supervisor constraints >> !
+  writeln ; writeln("* Allowing for changes only to supervisor load constraints ... ")
+  sethidden(expandLoadConstraint, true) ; sethidden(reduceLoadConstraint, true)
+  totalChanges := sum(s in supervisors) (expandLoad(s) + reduceLoad(s))
+  minimise(totalChanges)
+  if getprobstat <> XPRS_INF then
+    forall(s in supervisors) do
+      if getsol(expandLoad(s)) >= 1 then
+        writeln("Expand Load of ",s," by ",getsol(expandLoad(s))," Project(s)")
+      end-if
+      if getsol(reduceLoad(s)) >= 1 then
+        writeln("Reduce Load of ",s," by ",getsol(reduceLoad(s))," Project(s)")
+      end-if
+    end-do
+    writeln("Total Changes : ", getsol(totalChanges))
+  else
+    writeln("Upper bounds on expanding/reducing supervisor loads are too strict. Please increase this to obtain a suggestion.")
+  end-if
+  sethidden(expandLoadConstraint, false) ; sethidden(reduceLoadConstraint, false)
+  ! << Allow only for changes in project capacities >> !
+  writeln ; writeln("* Allowing for changes only to project capacity constraints ... ")
+  sethidden(expandCapacityConstraint, true)
+  totalChanges := sum(p in projects) expandCapacity(p)
+  minimise(totalChanges)
+  if getprobstat <> XPRS_INF then
+    forall(p in projects) do
+      if getsol(expandCapacity(p)) >= 1 then
+        writeln("Expand Capacity of Project ",p," by ",getsol(expandCapacity(p))," Student(s)")
+      end-if
+    end-do
+    writeln("Total Changes : ", getsol(totalChanges))
+  else
+    writeln("Upper bounds on expanding project capacities is too strict. Please increase this to obtain a suggestion. (If you have increased this greatly,
+but still are seeing this message, then it is likely the data will not support a feasible solution by solely changing capacities of projects)")
+  end-if
+  ! << Allow for changes to both supervisor constraints and project capacities >> !
+  writeln ; writeln("* Allowing for changes to both supervisor load and project capacity constraints ... ")
+  sethidden(expandLoadConstraint, true) ; sethidden(reduceLoadConstraint, true)
+  totalChanges := sum(s in supervisors) (expandLoad(s) + reduceLoad(s)) + sum(p in projects) expandCapacity(p)
+  minimise(totalChanges)
+  if getprobstat <> XPRS_INF then
+    forall(s in supervisors) do
+      if getsol(expandLoad(s)) >= 1 then
+        writeln("Expand Load of ",s," by ",getsol(expandLoad(s))," Project(s)")
+      end-if
+      if getsol(reduceLoad(s)) >= 1 then
+        writeln("Reduce Load of ",s," by ",getsol(reduceLoad(s))," Project(s)")
+      end-if
+    end-do
+    forall(p in projects) do
+      if getsol(expandCapacity(p)) >= 1 then
+        writeln("Expand Capacity of Project ",p," by ",getsol(expandCapacity(p))," Student(s)")
+      end-if
+    end-do
+    writeln("Total Changes : ", getsol(totalChanges))
+  else
+    writeln("Upper bounds on expanding/reducing supervisor loads and expanding project capacities are
+too strict. Please increase this to obtain a suggestion.")
+  end-if
+  writeln; writeln("Model finished after ",gettime-start_time," seconds")
+  ! Exit model
+  exit(1)
+
+! ------------- FEASIBLE ------------- !
+  ! If feasible - do nothing
+else writeln('OK!')
+end-if
+
+! ===== BEGIN PREPROCESSING (FIND THE UPPER BOUND FOR THE WORST-OFF STUDENT) ===== !
+
+declarations
+  temporaryConstraint: array(1..maxPref+1) of linctr
+end-declarations
+
+begin_preprocessing := gettime
+
+writeln('Beginning Preprocessing...')
+
+! Sequentially Maximise - Stop once we find z_u
+forall(i in 1..maxPref+1) do
+  maximise(F(i))
+  temporaryConstraint(i) := F(i) >= getsol(F(i))
+  if(sum(j in 1..i) getsol(F(j)) = totalStudents - getsize(preAllocatedStudents)) then
+    z_u := i
+    break
+  end-if
+end-do
+
+forall(i in 1..z_u) do
+  sethidden(temporaryConstraint(i), true)
+end-do
+
+! Check if n^(z_u) > 10^14... if so, optimisation using varying values of alpha is not appropriate
+if (totalStudents-getsize(preAllocatedStudents))^(z_u-1) > 1e14 then
+  writeln('Large Dataset Encountered')
+  path := 'B'
+else
+  path := 'A'
+end-if
+
+end_preprocessing := gettime
+
+writeln('Preprocessing Completed in ', end_preprocessing - begin_preprocessing, 's')
+writeln('...The upper bound for the worst-off student (z_u) is: Preference ', z_u) ; writeln
+
+! ============= SETUP OUTPUT FILE ============ !
+
+output_size := breadth*2+2
+if customAlphas then
+  output_size := customDepth+1
+elif path = 'B' then
+  output_size := 4
+end-if
+
+! Set size of output file depending on whether... We have Path A with or without custom alphas, or we have Path B
+declarations
+  outputToFile: array(1..output_size, 1..z_u) of real
+end-declarations
+
+forall(i in 1..z_u) do
+  outputToFile(1,i) := i
+end-do
+
+! Write the results of the "Sequential Maximisation" to the output file
+if not customAlphas then
+  forall(i in 1..z_u) outputToFile(2,i) := getsol(F(i))
+end-if
+
+! ============ PATH A =========== !
+
+if path = 'A' and not standaloneOBJ then
+
+  if not customAlphas then
+
+    begin_path_a := gettime
+
+    ! Maximise Objective Function (4.2) for all values of alpha for this given breadth
+    forall(k in 1..2*breadth) do
+      alpha := (totalStudents-getsize(preAllocatedStudents))^((-breadth+k)/breadth)
+      weights := [] ; forall(i in 1..z_u) weights += [alpha^(z_u-i)]
+      maximise(sum(i in 1..z_u) weights(i)*(A(maxPref+1-z_u+i)))
+      forall(i in 1..z_u) outputToFile(k+2,i) := getsol(F(i))
+    end-do
+
+    end_path_a := gettime
+
+  else
+
+    diff := maxExponent - minExponent
+    powerDiff := diff/(customDepth-1)
+
+    ! Maximise Objective Function (4.2) for all custom values of alpha
+    forall(k in 1..(customDepth)) do
+      alpha := (totalStudents-getsize(preAllocatedStudents))^(minExponent+(k-1)*powerDiff)
+      weights := [] ; forall(i in 1..z_u) weights += [alpha^(z_u-i)]
+      maximise(sum(i in 1..z_u) weights(i)*(A(maxPref+1-z_u+i)))
+      forall(i in 1..z_u) outputToFile(k+1,i) := getsol(F(i))
+    end-do
+
+  end-if
+
+  writeln('Path A completed in ', end_path_a - begin_path_a, 's
+The average run-time for a single maximisation was ', (end_path_a - begin_path_a)/((breadth*2)+1), 's') ; writeln
+
+end-if
+
+! ============ PATH B =========== !
+
+if path = 'B' and not standaloneOBJ then
+
+  begin_path_b := gettime
+
+  ! "Middle-Ground" Objective function
+  maximise(sum(i in 1..z_u) (A(maxPref+1-z_u+i)))
+
+  ! Write the results of the "Middle-Ground" OBJ function to the output array
+  forall(i in 1..z_u) outputToFile(3,i) := getsol(F(i))
+
+  ! Find which preference the "worst-off" student achieves in "Middle-Ground" OBJ function results
+  student_count := 0.0
+  forall(i in 1..maxPref+1) do
+    student_count += getsol(F(i))
+    if student_count = totalStudents - getsize(preAllocatedStudents) then
+      z_middle := i
+      break
+    end-if
+  end-do
+
+  ! Sequential minimisation
+  forall(i in z_middle+1..maxPref+1) do
+    F(i) = 0
+  end-do
+  forall(i in 1..z_middle) do
+    minimise(F(z_middle+1-i))
+    F(z_middle+1-i) <= getsol(F(z_middle+1-i))
+  end-do
+
+  ! Write the results of the "Sequential Maximisation" to file
+  forall(i in 1..z_u) outputToFile(4,i) := getsol(F(i))
+
+  end_path_b := gettime
+
+  writeln('Path B completed in ', end_path_b - begin_path_b, 's') ; writeln
+
+end-if
+
+! Output to file
+if not standaloneOBJ then
+
+  placeholderAlpha := ''
+  placeholderBreadth := 'Path_A_output_breadth_'+breadth
+  if customAlphas then
+    placeholderAlpha := '_CustomALPHA_'+maxExponent+'_'+minExponent
+    placeholderBreadth := 'Path_A_output_depth_'+customDepth
+  end-if
+  if path = 'B' then
+    placeholderAlpha := ''
+    placeholderBreadth := 'Path_B_output'
+  end-if
+
+  diskdata(ETC_OUT, placeholderBreadth+placeholderAlpha+".csv", outputToFile)
+  writeln('Results for multiple objective functions have been saved to "', placeholderBreadth+placeholderAlpha+'.csv" - these results can be viewed via the Python 3 file')
+
+end-if
+
+! =================================================== !
+! --------- STANDALONE OBJECTIVE FUNCTIONS ---------- !
+! =================================================== !
+
+if standaloneOBJ then
+
+  if OBJtype = 1 then
+
+    ! # CUSTOM ALPHA # !
+
+    alpha := totalStudents^customAlphaExponent
+    weights := [] ; forall(i in 1..z_u) weights += [alpha^(z_u-i)]
+    maximise(sum(i in 1..z_u) weights(i)*(A(maxPref+1-z_u+i)))
+
+  elif OBJtype = 3 then
+
+    ! # "MIDDLE-GROUND OBJ" # !
+
+    weights := [] ; forall(i in 1..z_u) weights += [1.0]
+    OBJ := sum(i in 1..z_u) weights(i)*(A(i))
+    maximise(OBJ)
+
+  elif OBJtype = 4 then
+
+    ! # SEQUENTIAL MINIMISATION # !
+
+    forall(i in z_u+1..maxPref+1) do
+      F(i) = 0
+    end-do
+    forall(i in 1..z_u) do
+      minimise(F(z_u+1-i))
+      F(z_u+1-i) <= getsol(F(z_u+1-i))
+    end-do
+
+  end-if
+
+  ! Output to file
+  fopen('project_allocation.csv',F_OUTPUT)
+  writeln('Student,Project,Supervisor,Preference')
+  forall(s in students, p in studentPref(s)) do
+    if getsol(x(s,p)) = 1 then
+      forall(i in 1..maxPref) do
+        if p = 'Dummy' then
+          choice := 'No Project Given To Student'
+          break
+        end-if
+        if p = studentPref(s,i) then
+          choice := string(i)
+          break
+        end-if
+      end-do
+    writeln(s,',',p,',',projectSupervisor(p),',',choice)
+    end-if
+  end-do
+  fclose(F_OUTPUT)
+  writeln('Standalone objective function results saved to "project_allocation.csv"')
+
+end-if
+
+! ================== END-OF-PROGRAM ================== !
+
+if preAllocated and not standaloneOBJ then
+  writeln; writeln('NOTE: There are ',getsize(preAllocatedStudents),' pre-allocated student(s) to projects! These students were not considered as part of the optimisation
+problem and hence are not part of the results in the output file. When you have decided upon a specific allocation and have set standaloneOBJ = true,
+they will be included and subsequently written to the output file along with all other students.')
+end-if
+
+is_suitable := 'suitable'
+if path = 'B' then
+  is_suitable := 'unsuitable'
+end-if
+
+if not standaloneOBJ then
+  writeln ; writeln('----- Your data file ',DATAFILE,' is ',is_suitable,' and has taken Path ',path,' -----')
+end-if
+
+if infeasible then
+  writeln ; writeln('===== WARNING: There are ',infeasibleStudents,' student(s) with infeasible choices of preferences. For more information regarding this,
+scroll up the console to "Primary Feasibility Check..." =====')
+end-if
+
+writeln; writeln("Model finished after ",gettime-start_time," seconds")
+
+end-model
